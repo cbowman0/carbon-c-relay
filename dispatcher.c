@@ -1183,7 +1183,7 @@ dispatch_connection(connection *conn, dispatcher *self, struct timeval start)
 
 	/* don't poll (read) when the last time we ran nothing happened,
 	 * this is to avoid excessive CPU usage, issue #126 */
-	if (__sync_bool_compare_and_swap(&(conn->datawaiting), 0, 0)) {
+	if (!__atomic_load_n(&(conn->datawaiting), __ATOMIC_ACQUIRE)) {
 		__sync_bool_compare_and_swap(&(conn->takenby), self->id, C_IN);
 		return 0;
 	}
@@ -1320,7 +1320,7 @@ dispatch_runner(void *arg)
 		int f;
 		int *sock;
 
-		while (__sync_bool_compare_and_swap(&(self->keep_running), 1, 1)) {
+		while (__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED)) {
 			pthread_rwlock_rdlock(&connectionslock);
 			if (ufdslen < MAX_LISTENERS + connectionslen) {
 				ufdslen = MAX_LISTENERS + connectionslen;
@@ -1336,12 +1336,12 @@ dispatch_runner(void *arg)
 			fds = 0;
 			for (c = 0; c < connectionslen; c++) {
 				conn = &(connections[c]);
-				if (!__sync_bool_compare_and_swap(&(conn->takenby), 0, 0))
+				if (__atomic_load_n(&(conn->takenby), __ATOMIC_ACQUIRE) != 0)
 					continue;
 				/* connections are only read from if we flagged that
 				 * there is data waiting, so sockets cannot disappear
 				 * for the read code doesn't trigger unless we polled it */
-				if (__sync_bool_compare_and_swap(&(conn->datawaiting), 0, 0))
+				if (!__atomic_load_n(&(conn->datawaiting), __ATOMIC_ACQUIRE))
 				{
 					ufds[fds].fd = conn->sock;
 					ufds[fds].events = POLLIN;
@@ -1373,9 +1373,9 @@ dispatch_runner(void *arg)
 							conn = &(connections[c]);
 							/* connection may be serviced at this point,
 							 * that's fine */
-							if ((char)__sync_add_and_fetch(&(conn->takenby), 0)
-									< 0)
-								continue;
+						if ((char)__atomic_load_n(&(conn->takenby),
+								__ATOMIC_ACQUIRE) < 0)
+							continue;
 							if (conn->sock == ufds[f].fd) {
 								__sync_bool_compare_and_swap(
 										&(conn->datawaiting), 0, 1);
@@ -1448,7 +1448,7 @@ dispatch_runner(void *arg)
 		struct timeval start;
 		struct timeval stop;
 
-		while (__sync_bool_compare_and_swap(&(self->keep_running), 1, 1)) {
+		while (__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED)) {
 			work = 0;
 
 			if (__sync_bool_compare_and_swap(&(self->route_refresh_pending),
@@ -1483,7 +1483,7 @@ dispatch_runner(void *arg)
 			__sync_add_and_fetch(&(self->ticks), timediff(start, stop));
 
 			/* nothing done, avoid spinlocking */
-			if (__sync_bool_compare_and_swap(&(self->keep_running), 1, 1) &&
+			if (__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED) &&
 					work == 0)
 			{
 				gettimeofday(&start, NULL);
