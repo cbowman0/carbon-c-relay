@@ -1,0 +1,50 @@
+FROM ubuntu:22.04
+
+# Avoid interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build tools, compression libs, SSL, regex libs, and perf tools.
+# linux-tools-generic provides /usr/lib/linux-tools/*/perf;
+# linux-perf is the wrapper that selects the right version.
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    clang \
+    zlib1g-dev \
+    libsnappy-dev \
+    liblz4-dev \
+    libssl-dev \
+    libonig-dev \
+    libpcre3-dev \
+    libpcre2-dev \
+    linux-tools-generic \
+    linux-tools-common \
+    netcat-openbsd \
+    bc \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a stable perf symlink regardless of kernel version
+RUN ln -sf /usr/lib/linux-tools/*/perf /usr/local/bin/perf 2>/dev/null || true
+
+WORKDIR /src
+COPY . /src
+
+# Fix autotools timestamps (workaround for git not preserving mtimes)
+RUN touch conffile.tab.c conffile.tab.h conffile.yy.c \
+         configure.ac Makefile.am aclocal.m4 configure \
+         Makefile.in config.h.in
+
+# Build production relay + sendmetric with all optional features enabled
+RUN ./configure --disable-maintainer-mode \
+        --with-gzip --with-lz4 --with-snappy --with-ssl \
+    && make CFLAGS="-O3 -Wall -pipe" clean all sendmetric
+
+# Build the malloc injection shared library
+RUN gcc -shared -fPIC -O2 -o test/failmalloc.so test/failmalloc.c -ldl
+
+# Make bench scripts executable
+RUN chmod +x test/bench.sh test/run-bench.sh
+
+ENTRYPOINT ["/src/test/bench.sh"]
+CMD ["--mode=throughput", "--variant=blackhole"]
