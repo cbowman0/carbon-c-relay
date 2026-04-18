@@ -115,7 +115,8 @@ build_sanitized() {
     cd "$REPO_DIR"
     make clean >/dev/null 2>&1 || true
     local flags="-O1 -g -fsanitize=$sanflag -fno-omit-frame-pointer"
-    make CFLAGS="$flags" all sendmetric
+    # LDFLAGS must also carry the sanitizer flag so the runtime is linked in
+    make CFLAGS="$flags" LDFLAGS="-fsanitize=$sanflag" all sendmetric
     echo "==> Build complete."
 }
 
