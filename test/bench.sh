@@ -323,6 +323,14 @@ run_sanitize() {
     sleep 2
 
     if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+        # TSan memory mapping errors mean it cannot run under this container/kernel
+        if grep -q "unexpected memory mapping" "$stress_log"; then
+            echo "==> Stress test: SKIP"
+            echo "    TSan requires native x86 hardware or --privileged with a compatible kernel."
+            echo "    Re-run on a native Linux x86 host for full TSan coverage."
+            RELAY_PID=""
+            return 0
+        fi
         echo "ERROR: relay failed to start under $SANITIZER. Log:" >&2
         cat "$stress_log" >&2
         exit 1
