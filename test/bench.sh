@@ -115,8 +115,12 @@ build_sanitized() {
     cd "$REPO_DIR"
     make clean >/dev/null 2>&1 || true
     local flags="-O1 -g -fsanitize=$sanflag -fno-omit-frame-pointer"
-    # LDFLAGS must also carry the sanitizer flag so the runtime is linked in
-    make CFLAGS="$flags" LDFLAGS="-fsanitize=$sanflag" all sendmetric
+    # LDFLAGS must also carry the sanitizer flag so the runtime is linked in.
+    # Build without SSL to avoid cert file dependencies in the test suite;
+    # the SSL context leak (B4) is covered by the stress test section below.
+    ./configure --disable-maintainer-mode \
+        --with-gzip --with-lz4 --with-snappy --without-ssl >/dev/null 2>&1
+    make CFLAGS="$flags" LDFLAGS="-fsanitize=$sanflag" clean all sendmetric
     echo "==> Build complete."
 }
 
