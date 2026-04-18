@@ -104,10 +104,17 @@ generate_payload() {
 #------------------------------------------------------------------------------
 build_sanitized() {
     local san=$1
-    echo "==> Building with -fsanitize=$san ..."
+    # Map short names to GCC/clang sanitizer flag values
+    local sanflag
+    case $san in
+        asan) sanflag=address ;;
+        tsan) sanflag=thread  ;;
+        *)    sanflag=$san    ;;
+    esac
+    echo "==> Building with -fsanitize=$sanflag ..."
     cd "$REPO_DIR"
     make clean >/dev/null 2>&1 || true
-    local flags="-O1 -g -fsanitize=$san -fno-omit-frame-pointer"
+    local flags="-O1 -g -fsanitize=$sanflag -fno-omit-frame-pointer"
     make CFLAGS="$flags" all sendmetric
     echo "==> Build complete."
 }
