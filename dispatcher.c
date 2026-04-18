@@ -1018,7 +1018,8 @@ dispatch_process_dests(connection *conn, dispatcher *self, struct timeval now)
 
 /* Extract received metrics from buffer */
 static void
-dispatch_received_metrics(connection *conn, dispatcher *self)
+dispatch_received_metrics(connection *conn, dispatcher *self,
+		struct timeval batchstart)
 {
 	/* Metrics look like this: metric_path value timestamp\n
 	 * due to various messups we need to sanitise the
@@ -1077,10 +1078,13 @@ dispatch_received_metrics(connection *conn, dispatcher *self)
 			firstspace = NULL;
 			search_tags = self->tags_supported ? 1 : 0;
 
-			gettimeofday(&conn->lastwork, NULL);
+			/* reuse the batch start time for idle-disconnect tracking;
+			 * per-metric precision is unnecessary since the timeout is
+			 * 10 minutes (IDLE_DISCONNECT_TIME) */
+			conn->lastwork = batchstart;
 			conn->maxsenddelay = 0;
 			/* send the metric to where it is supposed to go */
-			if (dispatch_process_dests(conn, self, conn->lastwork) == 0)
+			if (dispatch_process_dests(conn, self, batchstart) == 0)
 				break;
 		} else if (search_tags != 2 && /* leave tags alone, issue #453 */
 				   (*p == ' ' || *p == '\t' || *p == '.'))
@@ -1209,7 +1213,7 @@ dispatch_connection(connection *conn, dispatcher *self, struct timeval start)
 		}
 
 		err = errno;
-		dispatch_received_metrics(conn, self);
+		dispatch_received_metrics(conn, self, start);
 		if (conn->strm->strmreadbuf != NULL) {
 			while ((ilen = conn->strm->strmreadbuf(conn->strm,
 							conn->buf + conn->buflen,
@@ -1222,7 +1226,7 @@ dispatch_connection(connection *conn, dispatcher *self, struct timeval start)
 #ifdef ENABLE_TRACE
 				conn->buf[conn->buflen] = '\0';
 #endif
-				dispatch_received_metrics(conn, self);
+				dispatch_received_metrics(conn, self, start);
 			}
 
 			if (ilen < 0 && errno == ENOMEM) /* input buffer overflow */
