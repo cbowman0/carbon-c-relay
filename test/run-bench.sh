@@ -57,6 +57,7 @@ docker build \
 echo "==> Running benchmark inside container ..."
 docker run \
     --platform "$PLATFORM" \
+    --network host \
     --rm \
     $PRIVILEGED \
     "$IMAGE_NAME" \
