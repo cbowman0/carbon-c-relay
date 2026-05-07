@@ -50,6 +50,7 @@ done
 echo "==> Building Docker image: $IMAGE_NAME (platform: $PLATFORM) ..."
 docker build \
     --platform "$PLATFORM" \
+    --network host \
     -f "$SCRIPT_DIR/Dockerfile.bench" \
     -t "$IMAGE_NAME" \
     "$REPO_DIR"
