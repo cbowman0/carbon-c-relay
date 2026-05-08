@@ -207,7 +207,8 @@ run_throughput() {
 
     echo ""
     echo "=== CPU Stats (perf stat) ==="
-    cat "$TMPDIR_BENCH/perf_stat.txt"
+    # perf stat output is sometimes tricky to capture, ensuring we see it
+    cat "$TMPDIR_BENCH/perf_stat.txt" || echo "perf stat file not found"
     echo ""
 
     echo "=== Throughput Results ==="
