@@ -505,9 +505,13 @@ server_queuereader(void *d)
 	self->running = 1;
 	while (1) {
 		/* close connection when we're asked to reopen */
-		if (__sync_bool_compare_and_swap(&(self->reopen_con), 1, 0)) {
-			self->strm->strmclose(self->strm);
-			self->fd = -1;
+		{
+			char expected = 1;
+			if (__atomic_compare_exchange_n(&(self->reopen_con), &expected, 0,
+						0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+				self->strm->strmclose(self->strm);
+				self->fd = -1;
+			}
 		}
 		if (queue_len(self->queue) == 0) {
 			/* if we're idling, close the TCP connection, this allows us
@@ -526,18 +530,18 @@ server_queuereader(void *d)
 				 * stream of data to gain better compression */
 				self->strm->strmflush(self->strm);
 			gettimeofday(&stop, NULL);
-			__sync_add_and_fetch(&(self->ticks), timediff(start, stop));
-			if (__sync_bool_compare_and_swap(&(self->keep_running), 0, 0))
+			__atomic_add_fetch(&(self->ticks), timediff(start, stop), __ATOMIC_RELAXED);
+			if (!__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED))
 				break;
 			/* nothing to do, so slow down for a bit */
 			usleep((200 + (rand() % 100)) * 1000);  /* 200ms - 300ms */
 			/* if we are in failure mode, keep checking if we can
 			 * connect, this avoids unnecessary queue moves */
-			if (__sync_bool_compare_and_swap(&(self->failure), 0, 0))
+			if (__atomic_load_n(&(self->failure), __ATOMIC_ACQUIRE))
 				/* it makes no sense to try and do something, so skip */
 				continue;
 		} else if (self->secondariescnt > 0 &&
-				(__sync_add_and_fetch(&(self->failure), 0) >= FAIL_WAIT_TIME ||
+				(__atomic_load_n(&(self->failure), __ATOMIC_ACQUIRE) >= FAIL_WAIT_TIME ||
 				 (!self->failover && LEN_CRITICAL(self->queue))))
 		{
 			size_t i;
@@ -550,8 +554,8 @@ server_queuereader(void *d)
 						logerr("server: failed to allocate memory "
 								"for secpos\n");
 						gettimeofday(&stop, NULL);
-						__sync_add_and_fetch(&(self->ticks),
-								timediff(start, stop));
+						__atomic_add_fetch(&(self->ticks),
+								timediff(start, stop), __ATOMIC_RELAXED);
 						continue;
 					}
 					for (i = 0; i < self->secondariescnt; i++)
@@ -586,8 +590,9 @@ server_queuereader(void *d)
 			squeue = NULL;
 			for (i = 0; i < self->secondariescnt; i++) {
 				/* both conditions below make sure we skip ourself */
-				if (__sync_add_and_fetch(
-							&(self->secondaries[secpos[i]]->failure), 0))
+				if (__atomic_load_n(
+							&(self->secondaries[secpos[i]]->failure),
+							__ATOMIC_ACQUIRE))
 					continue;
 				squeue = self->secondaries[secpos[i]]->queue;
 				if (!self->failover && LEN_CRITICAL(squeue)) {
@@ -614,32 +619,28 @@ server_queuereader(void *d)
 				if (mode & MODE_DEBUG)
 					logerr("dropping metric: %s", *metric);
 				free((char *)*metric);
-				__sync_add_and_fetch(&(self->dropped), 1);
+				__atomic_add_fetch(&(self->dropped), 1, __ATOMIC_RELAXED);
 			}
 			gettimeofday(&stop, NULL);
-			__sync_add_and_fetch(&(self->ticks),
-					timediff(start, stop));
+			__atomic_add_fetch(&(self->ticks),
+					timediff(start, stop), __ATOMIC_RELAXED);
 			if (squeue == NULL) {
 				/* we couldn't do anything, take it easy for a bit */
-				if (__sync_add_and_fetch(&(self->failure), 0) > 1) {
-					/* This is a compound because I can't seem to figure
-					 * out how to atomically just "set" a variable.
-					 * It's not bad when in the middle there is a ++,
-					 * all that counts is that afterwards its > 0. */
-					__sync_and_and_fetch(&(self->failure), 0);
-					__sync_add_and_fetch(&(self->failure), 1);
+				if (__atomic_load_n(&(self->failure), __ATOMIC_ACQUIRE) > 1) {
+					/* Just atomically "set" to 1 */
+					__atomic_store_n(&(self->failure), 1, __ATOMIC_RELEASE);
 				}
-				if (__sync_bool_compare_and_swap(&(self->keep_running), 0, 0))
+				if (!__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED))
 					break;
 				usleep((200 + (rand() % 100)) * 1000);  /* 200ms - 300ms */
 			}
-		} else if (__sync_add_and_fetch(&(self->failure), 0) > 0) {
-			if (__sync_bool_compare_and_swap(&(self->keep_running), 0, 0))
+		} else if (__atomic_load_n(&(self->failure), __ATOMIC_ACQUIRE) > 0) {
+			if (!__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED))
 				break;
 			usleep((200 + (rand() % 100)) * 1000);  /* 200ms - 300ms */
 			/* avoid overflowing */
-			if (__sync_add_and_fetch(&(self->failure), 0) > FAIL_WAIT_TIME)
-				__sync_sub_and_fetch(&(self->failure), 1);
+			if (__atomic_load_n(&(self->failure), __ATOMIC_ACQUIRE) > FAIL_WAIT_TIME)
+				__atomic_sub_fetch(&(self->failure), 1, __ATOMIC_RELAXED);
 		}
 
 		/* at this point we've got work to do, if we're instructed to
@@ -663,7 +664,7 @@ server_queuereader(void *d)
 				if (getaddrinfo(self->ip, sport, self->hint, &saddr) == 0) {
 					self->saddr = saddr;
 				} else {
-					if (__sync_fetch_and_add(&(self->failure), 1) == 0)
+					if (__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 						logerr("failed to resolve %s:%u, server unavailable\n",
 								self->ip, self->port);
 					self->saddr = NULL;
@@ -674,7 +675,7 @@ server_queuereader(void *d)
 			if (self->ctype == CON_PIPE) {
 				int intconn[2];
 				if (pipe(intconn) < 0) {
-					if (__sync_fetch_and_add(&(self->failure), 1) == 0)
+					if (__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 						logerr("failed to create pipe: %s\n", strerror(errno));
 					continue;
 				}
@@ -685,7 +686,7 @@ server_queuereader(void *d)
 								O_WRONLY | O_APPEND | O_CREAT,
 								S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)) < 0)
 				{
-					if (__sync_fetch_and_add(&(self->failure), 1) == 0)
+					if (__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 						logerr("failed to open file '%s': %s\n",
 								self->ip, strerror(errno));
 					continue;
@@ -699,7 +700,7 @@ server_queuereader(void *d)
 									walk->ai_protocol)) < 0)
 					{
 						if (walk->ai_next == NULL &&
-								__sync_fetch_and_add(&(self->failure), 1) == 0)
+								__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 							logerr("failed to create udp socket: %s\n",
 									strerror(errno));
 						continue;
@@ -707,7 +708,7 @@ server_queuereader(void *d)
 					if (connect(self->fd, walk->ai_addr, walk->ai_addrlen) < 0)
 					{
 						if (walk->ai_next == NULL &&
-								__sync_fetch_and_add(&(self->failure), 1) == 0)
+								__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 							logerr("failed to connect udp socket: %s\n",
 									strerror(errno));
 						close(self->fd);
@@ -720,7 +721,7 @@ server_queuereader(void *d)
 				}
 				/* if this didn't resolve to anything, treat as failure */
 				if (self->saddr == NULL)
-					__sync_add_and_fetch(&(self->failure), 1);
+					__atomic_add_fetch(&(self->failure), 1, __ATOMIC_RELAXED);
 				/* if all addrinfos failed, try again later */
 				if (self->fd < 0)
 					continue;
@@ -735,7 +736,7 @@ server_queuereader(void *d)
 									walk->ai_protocol)) < 0)
 					{
 						if (walk->ai_next == NULL &&
-								__sync_fetch_and_add(&(self->failure), 1) == 0)
+								__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 							logerr("failed to create socket: %s\n",
 									strerror(errno));
 						continue;
@@ -763,8 +764,8 @@ server_queuereader(void *d)
 						if (ret == 0) {
 							/* time limit expired */
 							if (walk->ai_next == NULL &&
-									__sync_fetch_and_add(
-										&(self->failure), 1) == 0)
+									__atomic_fetch_add(
+										&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 								logerr("failed to connect() to "
 										"%s:%u: Operation timed out\n",
 										self->ip, self->port);
@@ -774,8 +775,8 @@ server_queuereader(void *d)
 						} else if (ret < 0) {
 							/* some select error occurred */
 							if (walk->ai_next &&
-									__sync_fetch_and_add(
-										&(self->failure), 1) == 0)
+									__atomic_fetch_add(
+										&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 								logerr("failed to poll() for %s:%u: %s\n",
 										self->ip, self->port, strerror(errno));
 							close(self->fd);
@@ -784,8 +785,8 @@ server_queuereader(void *d)
 						} else {
 							if (ufds[0].revents & POLLHUP) {
 								if (walk->ai_next == NULL &&
-										__sync_fetch_and_add(
-											&(self->failure), 1) == 0)
+										__atomic_fetch_add(
+											&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 									logerr("failed to connect() for %s:%u: "
 											"Connection refused\n",
 											self->ip, self->port);
@@ -796,7 +797,7 @@ server_queuereader(void *d)
 						}
 					} else if (ret < 0) {
 						if (walk->ai_next == NULL &&
-								__sync_fetch_and_add(&(self->failure), 1) == 0)
+								__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 						{
 							logerr("failed to connect() to %s:%u: %s\n",
 									self->ip, self->port, strerror(errno));
@@ -841,7 +842,7 @@ server_queuereader(void *d)
 				}
 				/* if this didn't resolve to anything, treat as failure */
 				if (self->saddr == NULL)
-					__sync_add_and_fetch(&(self->failure), 1);
+					__atomic_add_fetch(&(self->failure), 1, __ATOMIC_RELAXED);
 				/* all available addrinfos failed on us */
 				if (self->fd < 0)
 					continue;
@@ -988,7 +989,7 @@ server_queuereader(void *d)
 		metric = self->batch;
 
 		if (len != 0 &&
-				__sync_bool_compare_and_swap(&(self->keep_running), 0, 0))
+				!__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED))
 		{
 			/* be noisy during shutdown so we can track any slowing down
 			 * servers, possibly preventing us to shut down */
@@ -996,7 +997,7 @@ server_queuereader(void *d)
 					self->ip, self->port, len + queue_len(self->queue));
 		}
 
-		if (len == 0 && __sync_add_and_fetch(&(self->failure), 0)) {
+		if (len == 0 && __atomic_load_n(&(self->failure), __ATOMIC_ACQUIRE)) {
 			/* if we don't have anything to send, we have at least a
 			 * connection succeed, so assume the server is up again,
 			 * this is in particular important for recovering this
@@ -1004,7 +1005,7 @@ server_queuereader(void *d)
 			 * its queue is possibly being offloaded to secondaries */
 			if (self->ctype != CON_UDP)
 				logerr("server %s:%u: OK after probe\n", self->ip, self->port);
-			__sync_and_and_fetch(&(self->failure), 0);
+			__atomic_store_n(&(self->failure), 0, __ATOMIC_RELEASE);
 		}
 
 		for (; *metric != NULL; metric++) {
@@ -1033,7 +1034,7 @@ server_queuereader(void *d)
 				 * close connection regardless so we don't get
 				 * synchonisation problems */
 				if (self->ctype != CON_UDP &&
-						__sync_fetch_and_add(&(self->failure), 1) == 0)
+						__atomic_fetch_add(&(self->failure), 1, __ATOMIC_ACQ_REL) == 0)
 					logerr("failed to write() to %s:%u: %s\n",
 							self->ip, self->port,
 							(slen < 0 ?
@@ -1049,25 +1050,25 @@ server_queuereader(void *d)
 									self->ip, self->port,
 									*metric + sizeof(size_t));
 						free((char *)*metric);
-						__sync_add_and_fetch(&(self->dropped), 1);
+						__atomic_add_fetch(&(self->dropped), 1, __ATOMIC_RELAXED);
 					}
 				}
 				break;
-			} else if (!__sync_bool_compare_and_swap(&(self->failure), 0, 0)) {
+			} else if (__atomic_load_n(&(self->failure), __ATOMIC_ACQUIRE)) {
 				if (self->ctype != CON_UDP)
 					logerr("server %s:%u: OK\n", self->ip, self->port);
-				__sync_and_and_fetch(&(self->failure), 0);
+				__atomic_store_n(&(self->failure), 0, __ATOMIC_RELEASE);
 			}
 			free((char *)*metric);
-			__sync_add_and_fetch(&(self->metrics), 1);
+			__atomic_add_fetch(&(self->metrics), 1, __ATOMIC_RELAXED);
 		}
 
 		gettimeofday(&stop, NULL);
-		__sync_add_and_fetch(&(self->ticks), timediff(start, stop));
+		__atomic_add_fetch(&(self->ticks), timediff(start, stop), __ATOMIC_RELAXED);
 
 		idle = 0;
 	}
-	__sync_and_and_fetch(&(self->running), 0);
+	__atomic_store_n(&(self->running), 0, __ATOMIC_RELEASE);
 
 	if (self->fd >= 0)
 		self->strm->strmclose(self->strm);
@@ -1400,30 +1401,31 @@ inline char
 server_send(server *s, const char *d, char force)
 {
 	if (queue_free(s->queue) == 0) {
-		char failure = __sync_add_and_fetch(&(s->failure), 0);
+		char failure = __atomic_load_n(&(s->failure), __ATOMIC_ACQUIRE);
 		if (!force && s->secondariescnt > 0) {
 			size_t i;
 			/* don't immediately drop if we know there are others that
 			 * back us up */
 			for (i = 0; i < s->secondariescnt; i++) {
-				if (!__sync_add_and_fetch(&(s->secondaries[i]->failure), 0)) {
+				if (!__atomic_load_n(&(s->secondaries[i]->failure),
+							__ATOMIC_ACQUIRE)) {
 					failure = 0;
 					break;
 				}
 			}
 		}
 		if (failure || force ||
-				__sync_add_and_fetch(&(s->stallseq), 0) == s->maxstalls)
+				__atomic_load_n(&(s->stallseq), __ATOMIC_RELAXED) == s->maxstalls)
 		{
-			__sync_add_and_fetch(&(s->dropped), 1);
+			__atomic_add_fetch(&(s->dropped), 1, __ATOMIC_RELAXED);
 			/* excess event will be dropped by the enqueue below */
 		} else {
-			__sync_add_and_fetch(&(s->stallseq), 1);
-			__sync_add_and_fetch(&(s->stalls), 1);
+			__atomic_add_fetch(&(s->stallseq), 1, __ATOMIC_RELAXED);
+			__atomic_add_fetch(&(s->stalls), 1, __ATOMIC_RELAXED);
 			return 0;
 		}
 	} else {
-		__sync_and_and_fetch(&(s->stallseq), 0);
+		__atomic_store_n(&(s->stallseq), 0, __ATOMIC_RELEASE);
 	}
 	queue_enqueue(s->queue, d);
 
@@ -1436,7 +1438,7 @@ server_send(server *s, const char *d, char force)
 void
 server_closecon(server *s)
 {
-	__sync_bool_compare_and_swap(&(s->reopen_con), 0, 1);
+	__atomic_store_n(&(s->reopen_con), 1, __ATOMIC_RELEASE);
 }
 
 /**
@@ -1450,7 +1452,7 @@ server_shutdown(server *s)
 	size_t inqueue;
 
 	/* this function should only be called on a running server */
-	if (__sync_bool_compare_and_swap(&(s->keep_running), 0, 0))
+	if (!__atomic_load_n(&(s->keep_running), __ATOMIC_RELAXED))
 		return;
 
 	if (s->secondariescnt > 0) {
@@ -1461,9 +1463,11 @@ server_shutdown(server *s)
 			failures = 0;
 			inqueue = 0;
 			for (i = 0; i < s->secondariescnt; i++) {
-				if (__sync_add_and_fetch(&(s->secondaries[i]->failure), 0))
+				if (__atomic_load_n(&(s->secondaries[i]->failure),
+							__ATOMIC_ACQUIRE))
 					failures++;
-				if (__sync_add_and_fetch(&(s->secondaries[i]->running), 0))
+				if (__atomic_load_n(&(s->secondaries[i]->running),
+							__ATOMIC_ACQUIRE))
 					inqueue += queue_len(s->secondaries[i]->queue);
 			}
 			/* loop until we all failed, or nothing is in the queues */
@@ -1474,21 +1478,23 @@ server_shutdown(server *s)
 				usleep((200 + (rand() % 100)) * 1000) <= 0);
 		/* shut down entire cluster */
 		for (i = 0; i < s->secondariescnt; i++)
-			__sync_bool_compare_and_swap(
-					&(s->secondaries[i]->keep_running), 1, 0);
+			__atomic_store_n(&(s->secondaries[i]->keep_running), 0,
+					__ATOMIC_RELEASE);
 		/* to pretend to be dead for above loop (just in case) */
 		if (inqueue != 0)
 			for (i = 0; i < s->secondariescnt; i++)
-				__sync_add_and_fetch(&(s->secondaries[i]->failure), 1);
+				__atomic_add_fetch(&(s->secondaries[i]->failure), 1,
+						__ATOMIC_RELAXED);
 		/* wait for the secondaries to be stopped so we surely don't get
 		 * invalid reads when server_free is called */
 		for (i = 0; i < s->secondariescnt; i++) {
-			while (__sync_add_and_fetch(&(s->secondaries[i]->running), 0))
+			while (__atomic_load_n(&(s->secondaries[i]->running),
+						__ATOMIC_ACQUIRE))
 				usleep((200 + (rand() % 100)) * 1000);
 		}
 	}
 
-	__sync_bool_compare_and_swap(&(s->keep_running), 1, 0);
+	__atomic_store_n(&(s->keep_running), 0, __ATOMIC_RELEASE);
 }
 
 /**
@@ -1635,9 +1641,9 @@ server_failed(server *s)
 	if (s == NULL)
 		return 0;
 	if (!s->failover && s->secondariescnt > 0)
-		return __sync_add_and_fetch(&(s->failure), 0) >= FAIL_WAIT_TIME;
+		return __atomic_load_n(&(s->failure), __ATOMIC_ACQUIRE) >= FAIL_WAIT_TIME;
 	else
-		return __sync_add_and_fetch(&(s->failure), 0) > 0;
+		return __atomic_load_n(&(s->failure), __ATOMIC_ACQUIRE) > 0;
 }
 
 /**
@@ -1648,7 +1654,7 @@ server_get_ticks(server *s)
 {
 	if (s == NULL)
 		return 0;
-	return __sync_add_and_fetch(&(s->ticks), 0);
+	return __atomic_load_n(&(s->ticks), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1661,7 +1667,7 @@ server_get_ticks_sub(server *s)
 	size_t d;
 	if (s == NULL)
 		return 0;
-	d = __sync_add_and_fetch(&(s->ticks), 0) - s->prevticks;
+	d = __atomic_load_n(&(s->ticks), __ATOMIC_RELAXED) - s->prevticks;
 	s->prevticks += d;
 	return d;
 }
@@ -1674,7 +1680,7 @@ server_get_metrics(server *s)
 {
 	if (s == NULL)
 		return 0;
-	return __sync_add_and_fetch(&(s->metrics), 0);
+	return __atomic_load_n(&(s->metrics), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1686,7 +1692,7 @@ server_get_metrics_sub(server *s)
 	size_t d;
 	if (s == NULL)
 		return 0;
-	d = __sync_add_and_fetch(&(s->metrics), 0) - s->prevmetrics;
+	d = __atomic_load_n(&(s->metrics), __ATOMIC_RELAXED) - s->prevmetrics;
 	s->prevmetrics += d;
 	return d;
 }
@@ -1699,7 +1705,7 @@ server_get_dropped(server *s)
 {
 	if (s == NULL)
 		return 0;
-	return __sync_add_and_fetch(&(s->dropped), 0);
+	return __atomic_load_n(&(s->dropped), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1711,7 +1717,7 @@ server_get_dropped_sub(server *s)
 	size_t d;
 	if (s == NULL)
 		return 0;
-	d = __sync_add_and_fetch(&(s->dropped), 0) - s->prevdropped;
+	d = __atomic_load_n(&(s->dropped), __ATOMIC_RELAXED) - s->prevdropped;
 	s->prevdropped += d;
 	return d;
 }
@@ -1726,7 +1732,7 @@ server_get_stalls(server *s)
 {
 	if (s == NULL)
 		return 0;
-	return __sync_add_and_fetch(&(s->stalls), 0);
+	return __atomic_load_n(&(s->stalls), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1738,7 +1744,7 @@ server_get_stalls_sub(server *s)
 	size_t d;
 	if (s == NULL)
 		return 0;
-	d = __sync_add_and_fetch(&(s->stalls), 0) - s->prevstalls;
+	d = __atomic_load_n(&(s->stalls), __ATOMIC_RELAXED) - s->prevstalls;
 	s->prevstalls += d;
 	return d;
 }
@@ -1765,3 +1771,5 @@ server_get_queue_size(server *s)
 		return 0;
 	return queue_size(s->queue);
 }
+
+

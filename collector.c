@@ -96,8 +96,8 @@ collector_runner(void *s)
 	}
 
 	nextcycle = time(NULL) + collector_interval;
-	while (__sync_bool_compare_and_swap(&keep_running, 1, 1)) {
-		if ((prtr = __sync_add_and_fetch(&pending_router, 0)) != NULL) {
+	while (__atomic_load_n(&keep_running, __ATOMIC_RELAXED)) {
+		if ((prtr = __atomic_load_n(&pending_router, __ATOMIC_ACQUIRE)) != NULL) {
 			char *stub;
 			char *prefix;
 			server **newservers;
@@ -149,7 +149,7 @@ collector_runner(void *s)
 			*m = '\0';
 			sizem = sizeof(metric) - (m - metric);
 
-			(void)__sync_and_and_fetch(&pending_router, NULL);
+			__atomic_store_n(&pending_router, NULL, __ATOMIC_RELEASE);
 		}
 		assert(srvs != NULL);
 		sleep(1);
@@ -329,8 +329,8 @@ collector_writer(void *unused)
 	aggregator *aggrs = NULL;
 	int collector_interval = 60;
 
-	while (__sync_bool_compare_and_swap(&keep_running, 1, 1)) {
-		if ((prtr = __sync_add_and_fetch(&pending_router, 0)) != NULL) {
+	while (__atomic_load_n(&keep_running, __ATOMIC_RELAXED)) {
+		if ((prtr = __atomic_load_n(&pending_router, __ATOMIC_ACQUIRE)) != NULL) {
 			server **newservers = router_getservers(prtr);
 			if (srvs != NULL)
 				free(srvs);
@@ -338,7 +338,7 @@ collector_writer(void *unused)
 			aggrs = router_getaggregators(prtr);
 			numaggregators = aggregator_numaggregators(aggrs);
 			collector_interval = router_getcollectorinterval(prtr);
-			(void)__sync_and_and_fetch(&pending_router, NULL);
+			__atomic_store_n(&pending_router, NULL, __ATOMIC_RELEASE);
 		}
 		assert(srvs != NULL);
 		sleep(1);
@@ -451,7 +451,9 @@ collector_writer(void *unused)
 inline void
 collector_schedulereload(router *rtr)
 {
-	__sync_bool_compare_and_swap(&pending_router, NULL, rtr);
+	router *expected = NULL;
+	__atomic_compare_exchange_n(&pending_router, &expected, rtr,
+			0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
 /**
@@ -461,7 +463,7 @@ collector_schedulereload(router *rtr)
 inline char
 collector_reloadcomplete(void)
 {
-	return __sync_bool_compare_and_swap(&pending_router, NULL, NULL);
+	return __atomic_load_n(&pending_router, __ATOMIC_ACQUIRE) == NULL;
 }
 
 /**
@@ -489,6 +491,6 @@ collector_start(dispatcher **d, router *rtr, server *submission)
 void
 collector_stop(void)
 {
-	__sync_bool_compare_and_swap(&keep_running, 1, 0);
+	__atomic_store_n(&keep_running, 0, __ATOMIC_RELEASE);
 	pthread_join(collectorid, NULL);
 }

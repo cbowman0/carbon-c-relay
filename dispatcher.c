@@ -673,10 +673,12 @@ dispatch_addconnection(int sock, listener *lsnr)
 	char checksize;
 
 	pthread_rwlock_rdlock(&connectionslock);
-	for (c = 0; c < connectionslen; c++)
-		if (__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_FREE, C_SETUP))
+	for (c = 0; c < connectionslen; c++) {
+		char expected = C_FREE;
+		if (__atomic_compare_exchange_n(&(connections[c].takenby), &expected,
+					C_SETUP, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 			break;
+	}
 	checksize = c == connectionslen;
 	pthread_rwlock_unlock(&connectionslock);
 
@@ -759,8 +761,7 @@ dispatch_addconnection(int sock, listener *lsnr)
 	if (connections[c].strm == NULL) {
 		logerr("cannot add new connection: "
 				"out of memory allocating stream\n");
-		__sync_bool_compare_and_swap(&(connections[c].takenby),
-				C_SETUP, C_FREE);
+		__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 		return -1;
 	}
 
@@ -787,8 +788,7 @@ dispatch_addconnection(int sock, listener *lsnr)
 			logerr("cannot add new connection: %s\n",
 					ERR_reason_error_string(ERR_get_error()));
 			free(connections[c].strm);
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
+			__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 			return -1;
 		}
 		SSL_set_fd(connections[c].strm->hdl.ssl, sock);
@@ -830,8 +830,7 @@ dispatch_addconnection(int sock, listener *lsnr)
 			logerr("cannot add new connection: "
 					"out of memory allocating stream ibuf\n");
 			free(connections[c].strm);
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
+			__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 			return -1;
 		}
 	} else
@@ -851,8 +850,7 @@ dispatch_addconnection(int sock, listener *lsnr)
 					"out of memory allocating gzip stream\n");
 			free(ibuf);
 			free(connections[c].strm);
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
+			__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 			return -1;
 		}
 		zstrm->ipos = 0;
@@ -870,8 +868,7 @@ dispatch_addconnection(int sock, listener *lsnr)
 			free(ibuf);
 			free(connections[c].strm);
 			free(zstrm);
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
+			__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 			return -1;
 		}
 		zstrm->strmread = &gzipread;
@@ -890,8 +887,7 @@ dispatch_addconnection(int sock, listener *lsnr)
 					"out of memory allocating lz4 stream\n");
 			free(ibuf);
 			free(connections[c].strm);
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
+			__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 			return -1;
 		}
 		if (LZ4F_isError(LZ4F_createDecompressionContext(
@@ -901,8 +897,7 @@ dispatch_addconnection(int sock, listener *lsnr)
 			free(ibuf);
 			free(connections[c].strm);
 			free(lzstrm);
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
+			__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 			return -1;
 		}
 		lzstrm->ibuf = ibuf;
@@ -923,12 +918,9 @@ dispatch_addconnection(int sock, listener *lsnr)
 		if (lzstrm == NULL) {
 			logerr("cannot add new connection: "
 					"out of memory allocating snappy stream\n");
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
+			__atomic_store_n(&(connections[c].takenby), C_FREE, __ATOMIC_RELEASE);
 			free(ibuf);
 			free(connections[c].strm);
-			__sync_bool_compare_and_swap(&(connections[c].takenby),
-					C_SETUP, C_FREE);
 			return -1;
 		}
 
@@ -953,8 +945,12 @@ dispatch_addconnection(int sock, listener *lsnr)
 	gettimeofday(&connections[c].lastwork, NULL);
 	connections[c].datawaiting = 0;
 	/* after this dispatchers will pick this connection up */
-	__sync_bool_compare_and_swap(&(connections[c].takenby), C_SETUP, C_IN);
-	__sync_add_and_fetch(&acceptedconnections, 1);
+	{
+		char expected = C_SETUP;
+		__atomic_compare_exchange_n(&(connections[c].takenby), &expected, C_IN,
+				0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+	}
+	__atomic_add_fetch(&acceptedconnections, 1, __ATOMIC_RELAXED);
 
 	return c;
 }
@@ -1048,13 +1044,13 @@ dispatch_received_metrics(connection *conn, dispatcher *self,
 					q - conn->metric > self->maxinplen - 1 ||
 					firstspace - conn->metric > self->maxmetriclen)
 			{
-				__sync_add_and_fetch(&(self->discards), 1);
+				__atomic_add_fetch(&(self->discards), 1, __ATOMIC_RELAXED);
 				q = conn->metric;
 				firstspace = NULL;
 				continue;
 			}
 
-			__sync_add_and_fetch(&(self->metrics), 1);
+			__atomic_add_fetch(&(self->metrics), 1, __ATOMIC_RELAXED);
 			/* add newline and terminate the string, we can do this
 			 * because we substract one from buf and we always store
 			 * a full metric in buf before we copy it to metric
@@ -1065,11 +1061,12 @@ dispatch_received_metrics(connection *conn, dispatcher *self,
 			/* perform routing of this metric */
 			tracef("dispatcher %d, connfd %d, metric %s",
 					self->id, conn->sock, conn->metric);
-			__sync_add_and_fetch(&(self->blackholes),
+			__atomic_add_fetch(&(self->blackholes),
 					router_route(self->rtr,
 						conn->dests, &conn->destlen, CONN_DESTS_SIZE,
 						conn->srcaddr,
-						conn->metric, firstspace, self->id - 1));
+						conn->metric, firstspace, self->id - 1),
+					__ATOMIC_RELAXED);
 			tracef("dispatcher %d, connfd %d, destinations %zd\n",
 					self->id, conn->sock, conn->destlen);
 
@@ -1181,14 +1178,14 @@ dispatch_connection(connection *conn, dispatcher *self, struct timeval start)
 
 	/* first try to resume any work being blocked */
 	if (dispatch_process_dests(conn, self, start) == 0) {
-		__sync_bool_compare_and_swap(&(conn->takenby), self->id, C_IN);
+		__atomic_store_n(&(conn->takenby), C_IN, __ATOMIC_RELEASE);
 		return 0;
 	}
 
 	/* don't poll (read) when the last time we ran nothing happened,
 	 * this is to avoid excessive CPU usage, issue #126 */
-	if (__sync_bool_compare_and_swap(&(conn->datawaiting), 0, 0)) {
-		__sync_bool_compare_and_swap(&(conn->takenby), self->id, C_IN);
+	if (!__atomic_load_n(&(conn->datawaiting), __ATOMIC_ACQUIRE)) {
+		__atomic_store_n(&(conn->takenby), C_IN, __ATOMIC_RELEASE);
 		return 0;
 	}
 
@@ -1246,7 +1243,7 @@ dispatch_connection(connection *conn, dispatcher *self, struct timeval start)
 			/* force close connection below */
 			len = 0;
 		} else {
-			__sync_bool_compare_and_swap(&(conn->takenby), self->id, C_IN);
+			__atomic_store_n(&(conn->takenby), C_IN, __ATOMIC_RELEASE);
 			return 0;
 		}
 	}
@@ -1260,26 +1257,26 @@ dispatch_connection(connection *conn, dispatcher *self, struct timeval start)
 			/* reset buffer only (UDP/aggregations) and move on */
 			conn->needmore = 1;
 			conn->buflen = 0;
-			__sync_bool_compare_and_swap(&(conn->takenby), self->id, C_IN);
+			__atomic_store_n(&(conn->takenby), C_IN, __ATOMIC_RELEASE);
 
 			return len > 0;
 		} else if (conn->destlen == 0) {
 			tracef("dispatcher: %d, connfd: %d, len: %zd [%s], disconnecting\n",
 					self->id, conn->sock, len,
 					len < 0 ? strerror(errno) : "");
-			__sync_add_and_fetch(&closedconnections, 1);
+			__atomic_add_fetch(&closedconnections, 1, __ATOMIC_RELAXED);
 			conn->strm->strmclose(conn->strm);
 
 			/* flag this connection as no longer in use, unless there is
 			 * pending metrics to send */
 			conn->sock = -1;  /* ensure a poll won't match */
-			__sync_bool_compare_and_swap(&(conn->takenby), self->id, C_FREE);
+			__atomic_store_n(&(conn->takenby), C_FREE, __ATOMIC_RELEASE);
 			return 0;
 		}
 	}
 
 	/* "release" this connection again */
-	__sync_bool_compare_and_swap(&(conn->takenby), self->id, C_IN);
+	__atomic_store_n(&(conn->takenby), C_IN, __ATOMIC_RELEASE);
 
 	return 1;
 }
@@ -1324,7 +1321,7 @@ dispatch_runner(void *arg)
 		int f;
 		int *sock;
 
-		while (__sync_bool_compare_and_swap(&(self->keep_running), 1, 1)) {
+		while (__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED)) {
 			pthread_rwlock_rdlock(&connectionslock);
 			if (ufdslen < MAX_LISTENERS + connectionslen) {
 				ufdslen = MAX_LISTENERS + connectionslen;
@@ -1340,12 +1337,12 @@ dispatch_runner(void *arg)
 			fds = 0;
 			for (c = 0; c < connectionslen; c++) {
 				conn = &(connections[c]);
-				if (!__sync_bool_compare_and_swap(&(conn->takenby), 0, 0))
+				if (__atomic_load_n(&(conn->takenby), __ATOMIC_ACQUIRE) != 0)
 					continue;
 				/* connections are only read from if we flagged that
 				 * there is data waiting, so sockets cannot disappear
 				 * for the read code doesn't trigger unless we polled it */
-				if (__sync_bool_compare_and_swap(&(conn->datawaiting), 0, 0))
+				if (!__atomic_load_n(&(conn->datawaiting), __ATOMIC_ACQUIRE))
 				{
 					ufds[fds].fd = conn->sock;
 					ufds[fds].events = POLLIN;
@@ -1377,12 +1374,12 @@ dispatch_runner(void *arg)
 							conn = &(connections[c]);
 							/* connection may be serviced at this point,
 							 * that's fine */
-							if ((char)__sync_add_and_fetch(&(conn->takenby), 0)
-									< 0)
+							if ((char)__atomic_load_n(&(conn->takenby),
+									__ATOMIC_ACQUIRE) < 0)
 								continue;
 							if (conn->sock == ufds[f].fd) {
-								__sync_bool_compare_and_swap(
-										&(conn->datawaiting), 0, 1);
+								__atomic_store_n(&(conn->datawaiting), 1,
+										__ATOMIC_RELEASE);
 								sem_post(datawaiting);
 								tracef("data waiting on connection %d, "
 										"src %s\n", conn->sock, conn->srcaddr);
@@ -1452,17 +1449,15 @@ dispatch_runner(void *arg)
 		struct timeval start;
 		struct timeval stop;
 
-		while (__sync_bool_compare_and_swap(&(self->keep_running), 1, 1)) {
+		while (__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED)) {
 			work = 0;
 
-			if (__sync_bool_compare_and_swap(&(self->route_refresh_pending),
-						1, 1))
+			if (__atomic_load_n(&(self->route_refresh_pending), __ATOMIC_ACQUIRE))
 			{
 				self->rtr = self->pending_rtr;
 				self->pending_rtr = NULL;
-				__sync_bool_compare_and_swap(&(self->route_refresh_pending),
-						1, 0);
-				__sync_and_and_fetch(&(self->hold), 0);
+				__atomic_store_n(&(self->route_refresh_pending), 0, __ATOMIC_RELEASE);
+				__atomic_store_n(&(self->hold), 0, __ATOMIC_RELEASE);
 			}
 
 			gettimeofday(&start, NULL);
@@ -1470,24 +1465,26 @@ dispatch_runner(void *arg)
 			for (c = 0; c < connectionslen; c++) {
 				conn = &(connections[c]);
 				/* atomically try to "claim" this connection */
-				if (!__sync_bool_compare_and_swap(
-							&(conn->takenby), C_IN, self->id))
-					continue;
-				if (__sync_bool_compare_and_swap(
-							&(self->hold), 1, 1) && !conn->isaggr)
 				{
-					__sync_bool_compare_and_swap(
-							&(conn->takenby), self->id, C_IN);
+					char expected = C_IN;
+					if (!__atomic_compare_exchange_n(&(conn->takenby), &expected,
+								self->id, 0,
+								__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+						continue;
+				}
+				if (__atomic_load_n(&(self->hold), __ATOMIC_ACQUIRE) && !conn->isaggr)
+				{
+					__atomic_store_n(&(conn->takenby), C_IN, __ATOMIC_RELEASE);
 					continue;
 				}
 				work += dispatch_connection(conn, self, start);
 			}
 			pthread_rwlock_unlock(&connectionslock);
 			gettimeofday(&stop, NULL);
-			__sync_add_and_fetch(&(self->ticks), timediff(start, stop));
+			__atomic_add_fetch(&(self->ticks), timediff(start, stop), __ATOMIC_RELAXED);
 
 			/* nothing done, avoid spinlocking */
-			if (__sync_bool_compare_and_swap(&(self->keep_running), 1, 1) &&
+			if (__atomic_load_n(&(self->keep_running), __ATOMIC_RELAXED) &&
 					work == 0)
 			{
 				gettimeofday(&start, NULL);
@@ -1497,7 +1494,7 @@ dispatch_runner(void *arg)
 							(700 + (rand() % 300)) * 1000000) == 0)
 					tracef("dispatcher %d woken up\n", self->id);
 				gettimeofday(&stop, NULL);
-				__sync_add_and_fetch(&(self->sleeps), timediff(start, stop));
+				__atomic_add_fetch(&(self->sleeps), timediff(start, stop), __ATOMIC_RELAXED);
 			}
 		}
 	} else {
@@ -1621,7 +1618,7 @@ dispatch_new_connection(unsigned char id, router *r, char *allowed_chars,
 void
 dispatch_stop(dispatcher *d)
 {
-	__sync_bool_compare_and_swap(&(d->keep_running), 1, 0);
+	__atomic_store_n(&(d->keep_running), 0, __ATOMIC_RELEASE);
 }
 
 /**
@@ -1654,7 +1651,7 @@ dispatch_free(dispatcher *d)
 inline void
 dispatch_hold(dispatcher *d)
 {
-	__sync_bool_compare_and_swap(&(d->hold), 0, 1);
+	__atomic_store_n(&(d->hold), 1, __ATOMIC_RELEASE);
 }
 
 /**
@@ -1665,7 +1662,7 @@ inline void
 dispatch_schedulereload(dispatcher *d, router *r)
 {
 	d->pending_rtr = r;
-	__sync_bool_compare_and_swap(&(d->route_refresh_pending), 0, 1);
+	__atomic_store_n(&(d->route_refresh_pending), 1, __ATOMIC_RELEASE);
 }
 
 /**
@@ -1675,7 +1672,7 @@ dispatch_schedulereload(dispatcher *d, router *r)
 inline char
 dispatch_reloadcomplete(dispatcher *d)
 {
-	return __sync_bool_compare_and_swap(&(d->route_refresh_pending), 0, 0);
+	return __atomic_load_n(&(d->route_refresh_pending), __ATOMIC_ACQUIRE) == 0;
 }
 
 /**
@@ -1684,7 +1681,7 @@ dispatch_reloadcomplete(dispatcher *d)
 inline size_t
 dispatch_get_ticks(dispatcher *self)
 {
-	return __sync_add_and_fetch(&(self->ticks), 0);
+	return __atomic_load_n(&(self->ticks), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1706,7 +1703,7 @@ dispatch_get_ticks_sub(dispatcher *self)
 inline size_t
 dispatch_get_sleeps(dispatcher *self)
 {
-	return __sync_add_and_fetch(&(self->sleeps), 0);
+	return __atomic_load_n(&(self->sleeps), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1727,7 +1724,7 @@ dispatch_get_sleeps_sub(dispatcher *self)
 inline size_t
 dispatch_get_metrics(dispatcher *self)
 {
-	return __sync_add_and_fetch(&(self->metrics), 0);
+	return __atomic_load_n(&(self->metrics), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1749,8 +1746,9 @@ dispatch_get_metrics_sub(dispatcher *self)
 inline size_t
 dispatch_get_blackholes(dispatcher *self)
 {
-	return __sync_add_and_fetch(&(self->blackholes), 0);
+	return __atomic_load_n(&(self->blackholes), __ATOMIC_RELAXED);
 }
+
 
 /**
  * Returns the number of metrics that were blackholed since last call to
@@ -1770,7 +1768,7 @@ dispatch_get_blackholes_sub(dispatcher *self)
 inline size_t
 dispatch_get_discards(dispatcher *self)
 {
-	return __sync_add_and_fetch(&(self->discards), 0);
+	return __atomic_load_n(&(self->discards), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1791,7 +1789,7 @@ dispatch_get_discards_sub(dispatcher *self)
 inline size_t
 dispatch_get_accepted_connections(void)
 {
-	return __sync_add_and_fetch(&(acceptedconnections), 0);
+	return __atomic_load_n(&(acceptedconnections), __ATOMIC_RELAXED);
 }
 
 /**
@@ -1800,5 +1798,5 @@ dispatch_get_accepted_connections(void)
 inline size_t
 dispatch_get_closed_connections(void)
 {
-	return __sync_add_and_fetch(&(closedconnections), 0);
+	return __atomic_load_n(&(closedconnections), __ATOMIC_RELAXED);
 }

@@ -95,7 +95,7 @@ relaylog(enum logdst dest, const char *fmt, ...)
 	int ret;
 
 	/* briefly stall if we're swapping fds */
-	while (!__sync_add_and_fetch(&relay_can_log, 0))
+	while (!__atomic_load_n(&relay_can_log, __ATOMIC_ACQUIRE))
 		usleep((100 + (rand() % 200)) * 1000);  /* 100ms - 300ms */
 
 	switch (dest) {
@@ -140,7 +140,9 @@ sig_handler(int sig)
 	/* a thunder of signals will be ignored for as long as a pending
 	 * signal was set, I can live with that, feels like a bad practice
 	 * to bombard a process like that */
-	(void)__sync_bool_compare_and_swap(&pending_signal, -1, sig);
+	int expected = -1;
+	(void)__atomic_compare_exchange_n(&pending_signal, &expected, sig,
+			0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
 static void
@@ -161,13 +163,13 @@ do_reload(void)
 					relay_logfile, strerror(errno));
 		} else {
 			logout("closing logfile\n");
-			__sync_and_and_fetch(&relay_can_log, 0);
+			__atomic_store_n(&relay_can_log, 0, __ATOMIC_RELEASE);
 			/* lame race avoidance for relaylog() usage */
 			usleep((100 + (rand() % 200)) * 1000);  /* 100ms - 300ms */
 			fclose(relay_stderr);
 			relay_stdout = newfd;
 			relay_stderr = newfd;
-			__sync_bool_compare_and_swap(&relay_can_log, 0, 1);
+			__atomic_store_n(&relay_can_log, 1, __ATOMIC_RELEASE);
 			logout("reopening logfile\n");
 		}
 	}

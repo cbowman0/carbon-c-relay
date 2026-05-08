@@ -171,7 +171,7 @@ aggregator_putmetric(
 	struct _aggr_bucket_entries *entries;
 
 	/* do not accept new values when shutting down, issue #200 */
-	if (__sync_bool_compare_and_swap(&keep_running, 0, 0))
+	if (!__atomic_load_n(&keep_running, __ATOMIC_RELAXED))
 		return;
 
 	/* get timestamp */
@@ -183,7 +183,7 @@ aggregator_putmetric(
 		return;
 	}
 
-	__sync_add_and_fetch(&s->received, 1);
+	__atomic_add_fetch(&s->received, 1, __ATOMIC_RELAXED);
 
 	val = atof(firstspace + 1);
 	epoch = atoll(v + 1);
@@ -297,7 +297,7 @@ aggregator_putmetric(
 		itime = epoch - invocation->buckets[0].start;
 		if (itime < 0) {
 			/* drop too old metric */
-			__sync_add_and_fetch(&s->dropped, 1);
+			__atomic_add_fetch(&s->dropped, 1, __ATOMIC_RELAXED);
 			pthread_rwlock_unlock(&compute->invlock);
 			continue;
 		}
@@ -308,15 +308,15 @@ aggregator_putmetric(
 						"future (%lld > %lld): %s from %s", epoch,
 						invocation->buckets[s->bucketcnt - 1].start,
 						ometric, metric);
-			__sync_add_and_fetch(&s->dropped, 1);
+			__atomic_add_fetch(&s->dropped, 1, __ATOMIC_RELAXED);
 			pthread_rwlock_unlock(&compute->invlock);
 			continue;
 		}
 
 		bucket = &invocation->buckets[itime / s->interval];
-		if (__sync_bool_compare_and_swap(&bucket->state, A_EXPIRE, A_EXPIRE)) {
+		if (__atomic_load_n(&bucket->state, __ATOMIC_ACQUIRE) == A_EXPIRE) {
 			/* drop too old metric */
-			__sync_add_and_fetch(&s->dropped, 1);
+			__atomic_add_fetch(&s->dropped, 1, __ATOMIC_RELAXED);
 			pthread_rwlock_unlock(&compute->invlock);
 			continue;
 		}
@@ -453,13 +453,13 @@ write_metric(
 		logerr("aggregator: failed to write to "
 				"pipe (fd=%d): %s\n",
 				s->fd, strerror(errno));
-		__sync_add_and_fetch(&s->dropped, 1);
+		__atomic_add_fetch(&s->dropped, 1, __ATOMIC_RELAXED);
 	} else if (ts < len) {
 		logerr("aggregator: uncomplete write on "
 				"pipe (fd=%d)\n", s->fd);
-		__sync_add_and_fetch(&s->dropped, 1);
+		__atomic_add_fetch(&s->dropped, 1, __ATOMIC_RELAXED);
 	} else {
-		__sync_add_and_fetch(&s->sent, 1);
+		__atomic_add_fetch(&s->sent, 1, __ATOMIC_RELAXED);
 	}
 }
 
@@ -493,8 +493,8 @@ aggregator_expire(void *sub)
 			/* send metrics for buckets that are completely past the
 			 * expiry time, unless we are shutting down, then send
 			 * metrics for all buckets that have completed */
-			now = time(NULL) + (__sync_bool_compare_and_swap(
-						&keep_running, 1, 1) ? 0 : s->expire - s->interval);
+			now = time(NULL) + (__atomic_load_n(&keep_running, __ATOMIC_RELAXED) ?
+						0 : s->expire - s->interval);
 			for (c = s->computes; c != NULL; c = c->next) {
 				pthread_rwlock_rdlock(&c->invlock);
 				for (i = 0; i < (1 << AGGR_HT_POW_SIZE); i++) {
@@ -504,12 +504,13 @@ aggregator_expire(void *sub)
 							inv = inv->next)
 					{
 						for (b = &inv->buckets[0];
-							b->start + (__sync_bool_compare_and_swap(
-										&keep_running, 1, 1) ?
+							b->start + (__atomic_load_n(&keep_running, __ATOMIC_RELAXED) ?
 								 		inv->expire : s->expire) < now; b++)
 						{
-							if (!__sync_bool_compare_and_swap(
-										&b->state, A_OPEN, A_EXPIRE))
+							__typeof__(b->state) expected = A_OPEN;
+							if (!__atomic_compare_exchange_n(&b->state, &expected,
+										A_EXPIRE, 0,
+										__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 								continue;
 
 							/* avoid emitting empty/unitialised data */
@@ -591,7 +592,7 @@ aggregator_expire(void *sub)
 		}
 
 		if (work == 0) {
-			if (__sync_bool_compare_and_swap(&keep_running, 0, 0))
+			if (!__atomic_load_n(&keep_running, __ATOMIC_RELAXED))
 				break;
 			/* nothing done, avoid spinlocking */
 			usleep(250 * 1000);  /* 250ms */
@@ -688,7 +689,7 @@ aggregator_start(aggregator *aggrs)
 void
 aggregator_stop(void)
 {
-	__sync_bool_compare_and_swap(&keep_running, 1, 0);
+	__atomic_store_n(&keep_running, 0, __ATOMIC_RELEASE);
 	pthread_join(aggregatorid, NULL);
 }
 
@@ -701,7 +702,7 @@ aggregator_get_received(aggregator *a)
 	size_t totreceived = 0;
 
 	for ( ; a != NULL; a = a->next)
-		totreceived += __sync_add_and_fetch(&a->received, 0);
+		totreceived += __atomic_load_n(&a->received, __ATOMIC_RELAXED);
 
 	return totreceived;
 }
@@ -727,7 +728,7 @@ aggregator_get_sent(aggregator *a)
 	size_t totsent = 0;
 
 	for ( ; a != NULL; a = a->next)
-		totsent += __sync_add_and_fetch(&a->sent, 0);
+		totsent += __atomic_load_n(&a->sent, __ATOMIC_RELAXED);
 
 	return totsent;
 }
@@ -755,7 +756,7 @@ aggregator_get_dropped(aggregator *a)
 	size_t totdropped = 0;
 
 	for ( ; a != NULL; a = a->next)
-		totdropped += __sync_add_and_fetch(&a->dropped, 0);
+		totdropped += __atomic_load_n(&a->dropped, __ATOMIC_RELAXED);
 
 	return totdropped;
 }
