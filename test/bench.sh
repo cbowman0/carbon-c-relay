@@ -172,9 +172,8 @@ run_throughput() {
         sleep 0.5
     fi
 
-    echo "==> Starting relay (variant=$VARIANT, workers=$WORKERS, port=$LISTEN_PORT) with perf stat ..."
-    perf stat -o "$TMPDIR_BENCH/perf_stat.txt" \
-        "$RELAY" -f "$conf" -w "$WORKERS" -p "$LISTEN_PORT" -S \
+    echo "==> Starting relay (variant=$VARIANT, workers=$WORKERS, port=$LISTEN_PORT) ..."
+    "$RELAY" -f "$conf" -w "$WORKERS" -p "$LISTEN_PORT" -S \
         2>"$relay_log" >"$statsfile" &
     RELAY_PID=$!
     sleep 2
@@ -206,11 +205,6 @@ run_throughput() {
     RELAY_PID=""
 
     echo ""
-    echo "=== CPU Stats (perf stat) ==="
-    # perf stat output is sometimes tricky to capture, ensuring we see it
-    cat "$TMPDIR_BENCH/perf_stat.txt" || echo "perf stat file not found"
-    echo ""
-
     echo "=== Throughput Results ==="
     parse_stats "$statsfile" "$VARIANT" "$WORKERS" "$((METRICS * CONNECTIONS))"
     echo ""
