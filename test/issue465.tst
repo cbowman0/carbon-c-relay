@@ -1,2 +1,9 @@
 host.b0123456.component1.c
 host.b0123456.component1.c_rate
+prefix.test.123.suffix
+leading.middle.trailing
+exact.match
+start.something
+something.end
+some.inner.thing
+*

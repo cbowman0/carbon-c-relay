@@ -251,13 +251,9 @@ determine_if_regex(allocator *a, char workercnt, route *r, char *pat)
 		if (ret != 0)
 			return ret;  /* allow use of regerror */
 		if (r->rule[0].re_nsub > 0) {
-			if (capgroup == 0) {
-				r->nmatch = 0;
-			} else {
-				/* we need +1 because position 0 contains the entire
-				 * expression */
-				r->nmatch = r->rule[0].re_nsub + 1;
-			}
+			/* we need +1 because position 0 contains the entire
+			 * expression */
+			r->nmatch = r->rule[0].re_nsub + 1;
 			if (r->nmatch > RE_MAX_MATCHES) {
 				logerr("determine_if_regex: too many match groups, "
 						"please increase RE_MAX_MATCHES in router.h\n");
@@ -2571,6 +2567,8 @@ router_metric_matches(
 	switch (r->matchtype) {
 		case MATCHALL:
 			ret = 1;
+			pmatch[0].rm_so = 0;
+			pmatch[0].rm_eo = firstspace - metric;
 			break;
 		case REGEX:
 			*firstspace = '\0';
@@ -2646,7 +2644,7 @@ router_rewrite_metric(
 
 	/* insert leading part */
 	q = metric;
-	t = metric + pmatch[0].rm_so;
+	t = metric + (pmatch[0].rm_so == -1 ? 0 : pmatch[0].rm_so);
 	if (s - *newmetric + t - q < sizeof(*newmetric)) {
 		while (q < t)
 			*s++ = *q++;
@@ -2695,7 +2693,7 @@ router_rewrite_metric(
 					} else {
 						if (escape) {
 							if (ref > 0 &&
-								ref <= nmatch &&
+								ref < nmatch &&
 								pmatch[ref].rm_so >= 0)
 							{
 								/* insert match part */
@@ -2774,7 +2772,7 @@ router_rewrite_metric(
 	s--;
 
 	/* insert remaining part */
-	q = metric + pmatch[0].rm_eo;
+	q = metric + (pmatch[0].rm_so == -1 ? (firstspace - metric) : pmatch[0].rm_eo);
 	t = firstspace;
 	if (s - *newmetric + t - q < sizeof(*newmetric)) {
 		while (q < t)
@@ -2877,6 +2875,9 @@ router_route_intern(
 	const char *fmtmetric;
 	size_t len;
 	regmatch_t pmatch[RE_MAX_MATCHES];
+
+	pmatch[0].rm_so = -1;
+	pmatch[0].rm_eo = -1;
 
 #define failif(RETLEN, WANTLEN) \
 	if (WANTLEN > RETLEN) { \
@@ -3206,6 +3207,9 @@ router_test_intern(char *metric, char *firstspace, route *routes)
 	char *newfirstspace = NULL;
 	size_t len;
 	regmatch_t pmatch[RE_MAX_MATCHES];
+
+	pmatch[0].rm_so = -1;
+	pmatch[0].rm_eo = -1;
 
 	for (w = routes; w != NULL; w = w->next) {
 		if (w->dests->cl->type == GROUP) {

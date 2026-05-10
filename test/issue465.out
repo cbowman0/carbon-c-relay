@@ -11,30 +11,116 @@ statistics
     ;
 
 
-aggregate host\.b[0-9]+\.(.+)\.c
-    every 60 seconds
-    expire after 120 seconds
-    timestamp at start of bucket
-    compute average write to
-        aggregation.\\1.c
-    ;
 aggregate host\.b[0-9]+\.component1\.c
     every 60 seconds
     expire after 120 seconds
     timestamp at start of bucket
     compute average write to
         aggregation.component1.c
+    send to blackhole
+    ;
+aggregate host\.b[0-9]+\.(.+)\.c
+    every 60 seconds
+    expire after 120 seconds
+    timestamp at start of bucket
+    compute average write to
+        aggregation.\1.c
+    send to blackhole
+    ;
+rewrite ^(prefix)\.([a-z]+(\.[0-9]+))\.(suffix)$
+    into \4.\3.\2.\1
+    ;
+rewrite middle
+    into center
+    ;
+rewrite exact.match
+    into replacement.match
+    ;
+rewrite ^start\.
+    into begin.
+    ;
+rewrite \.end$
+    into .finish
+    ;
+rewrite \.inner\.
+    into .core.
+    ;
+match *
+    send to blackhole
+    stop
     ;
 
 aggregation
-    host\.b[0-9]+\.(.+)\.c (regex) -> host.b0123456.component1.c
-    average(aggregation.\\1.c) -> aggregation.component1.c 
-aggregation
     host\.b[0-9]+\.component1\.c (regex) -> host.b0123456.component1.c
-    average -> aggregation.component1.c 
+    average(aggregation.component1.c) -> aggregation.component1.c 
+    blackholed
 aggregation
-    host\.b[0-9]+\.(.+)\.c (regex) -> host.b0123456.component1.c_rate
-    average(aggregation.\\1.c) -> aggregation.component1.c_rate 
+    host\.b[0-9]+\.(.+)\.c (regex) -> host.b0123456.component1.c
+    average(aggregation.\1.c) -> aggregation.component1.c 
+    blackholed
+match
+    * -> host.b0123456.component1.c
+    blackholed
+    stop
 aggregation
     host\.b[0-9]+\.component1\.c (regex) -> host.b0123456.component1.c_rate
-    average -> aggregation.component1.c_rate 
+    average(aggregation.component1.c) -> aggregation.component1.c_rate 
+    blackholed
+aggregation
+    host\.b[0-9]+\.(.+)\.c (regex) -> host.b0123456.component1.c_rate
+    average(aggregation.\1.c) -> aggregation.component1.c_rate 
+    blackholed
+match
+    * -> host.b0123456.component1.c_rate
+    blackholed
+    stop
+rewrite
+    ^(prefix)\.([a-z]+(\.[0-9]+))\.(suffix)$ (regex) -> prefix.test.123.suffix
+    into(\4.\3.\2.\1) -> suffix..123.test.123.prefix
+match
+    * -> suffix..123.test.123.prefix
+    blackholed
+    stop
+rewrite
+    middle [strstr: middle]
+    -> leading.middle.trailing
+    into(center) -> leading.center.trailing
+match
+    * -> leading.center.trailing
+    blackholed
+    stop
+rewrite
+    exact.match (regex) -> exact.match
+    into(replacement.match) -> replacement.match
+match
+    * -> replacement.match
+    blackholed
+    stop
+rewrite
+    ^start\. [strncmp: start.]
+    -> start.something
+    into(begin.) -> begin.something
+match
+    * -> begin.something
+    blackholed
+    stop
+rewrite
+    \.end$ [tailcmp: .end]
+    -> something.end
+    into(.finish) -> something.finish
+match
+    * -> something.finish
+    blackholed
+    stop
+rewrite
+    \.inner\. [strstr: .inner.]
+    -> some.inner.thing
+    into(.core.) -> some.core.thing
+match
+    * -> some.core.thing
+    blackholed
+    stop
+match
+    * -> *
+    blackholed
+    stop
