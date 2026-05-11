@@ -33,6 +33,8 @@
 typedef struct {
 	pcre2_code *re_pcre2_code;
 	pcre2_match_data *re_match_data;
+	pcre2_match_context *re_match_context;
+	pcre2_jit_stack *re_jit_stack;
 	size_t re_nsub;
 	char re_owner;
 } regex_t;

@@ -94,6 +94,21 @@ pcre2_regcomp(regex_t *preg, const char *pattern, int cflags, char use_jit)
 		return PCRE2_ERROR_NOMEMORY;
 	}
 
+	/* If JIT was used, attach a per-worker JIT stack and match context.
+	 * Without this, pcre2_match transparently allocates a 32 KB JIT
+	 * stack on every invocation, which causes malloc contention across
+	 * threads. */
+	if (use_jit) {
+		preg->re_jit_stack = pcre2_jit_stack_create(32 * 1024, 1024 * 1024, NULL);
+		if (preg->re_jit_stack != NULL) {
+			preg->re_match_context = pcre2_match_context_create(NULL);
+			if (preg->re_match_context != NULL) {
+				pcre2_jit_stack_assign(preg->re_match_context,
+						NULL, preg->re_jit_stack);
+			}
+		}
+	}
+
 	return 0;
 }
 
@@ -116,7 +131,7 @@ pcre2_regexec(
 			0,
 			0,
 			preg->re_match_data,
-			NULL);
+			preg->re_match_context);
 
 	if (rc < 0)
 		return rc; // PCRE2_ERROR_NOMATCH etc
@@ -139,12 +154,18 @@ pcre2_regexec(
 static void
 pcre2_regfree(regex_t *preg)
 {
+	if (preg->re_match_context)
+		pcre2_match_context_free(preg->re_match_context);
+	if (preg->re_jit_stack)
+		pcre2_jit_stack_free(preg->re_jit_stack);
 	if (preg->re_owner && preg->re_pcre2_code)
 		pcre2_code_free(preg->re_pcre2_code);
 	if (preg->re_match_data)
 		pcre2_match_data_free(preg->re_match_data);
 	preg->re_pcre2_code = NULL;
 	preg->re_match_data = NULL;
+	preg->re_match_context = NULL;
+	preg->re_jit_stack = NULL;
 	preg->re_owner = 0;
 }
 
@@ -389,6 +410,20 @@ determine_if_regex(allocator *a, char workercnt, route *r, char *pat, char use_j
 				logerr("determine_if_regex: out of memory allocating "
 						"match data\n");
 				return PCRE2_ERROR_NOMEMORY;
+			}
+			/* per-worker JIT stack + match context to avoid the
+			 * per-call 32 KB malloc otherwise done by pcre2_match */
+			if (use_jit) {
+				r->rule[i].re_jit_stack =
+					pcre2_jit_stack_create(32 * 1024, 1024 * 1024, NULL);
+				if (r->rule[i].re_jit_stack != NULL) {
+					r->rule[i].re_match_context =
+						pcre2_match_context_create(NULL);
+					if (r->rule[i].re_match_context != NULL) {
+						pcre2_jit_stack_assign(r->rule[i].re_match_context,
+								NULL, r->rule[i].re_jit_stack);
+					}
+				}
 			}
 #else
 			if (regcomp(&r->rule[i], r->pattern, REG_EXTENDED) != 0) {
