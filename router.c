@@ -43,6 +43,102 @@
 #include "conffile.h"
 #include "conffile.tab.h"
 
+#ifdef HAVE_PCRE2
+static int
+pcre2_regcomp(regex_t *preg, const char *pattern, int cflags, char use_jit)
+{
+	int errorcode;
+	PCRE2_SIZE erroroffset;
+	uint32_t options = 0;
+
+	preg->re_pcre2_code = pcre2_compile(
+			(PCRE2_SPTR)pattern,
+			PCRE2_ZERO_TERMINATED,
+			options,
+			&errorcode,
+			&erroroffset,
+			NULL);
+
+	if (preg->re_pcre2_code == NULL)
+		return errorcode;
+
+	preg->re_owner = 1;
+	(void)pcre2_pattern_info(preg->re_pcre2_code,
+			PCRE2_INFO_CAPTURECOUNT, &preg->re_nsub);
+
+	if (use_jit) {
+		if (pcre2_jit_compile(preg->re_pcre2_code, PCRE2_JIT_COMPLETE) < 0) {
+			/* ignore JIT failure, we can still match interpretively */
+		}
+	}
+
+	preg->re_match_data = pcre2_match_data_create_from_pattern(
+			preg->re_pcre2_code, NULL);
+	if (preg->re_match_data == NULL) {
+		pcre2_code_free(preg->re_pcre2_code);
+		preg->re_pcre2_code = NULL;
+		return PCRE2_ERROR_NOMEMORY;
+	}
+
+	return 0;
+}
+
+static int
+pcre2_regexec(
+		const regex_t *preg,
+		const char *string,
+		size_t nmatch,
+		regmatch_t pmatch[],
+		int eflags)
+{
+	int rc;
+	PCRE2_SIZE *ovector;
+	size_t i;
+
+	rc = pcre2_match(
+			preg->re_pcre2_code,
+			(PCRE2_SPTR)string,
+			PCRE2_ZERO_TERMINATED,
+			0,
+			0,
+			preg->re_match_data,
+			NULL);
+
+	if (rc < 0)
+		return rc; // PCRE2_ERROR_NOMATCH etc
+
+	ovector = pcre2_get_ovector_pointer(preg->re_match_data);
+	if (rc == 0)
+		rc = pcre2_get_ovector_count(preg->re_match_data);
+	for (i = 0; i < nmatch && i < (size_t)rc; i++) {
+		pmatch[i].rm_so = ovector[2*i] == PCRE2_UNSET ? -1 : (ssize_t)ovector[2*i];
+		pmatch[i].rm_eo = ovector[2*i+1] == PCRE2_UNSET ? -1 : (ssize_t)ovector[2*i+1];
+	}
+	for (; i < nmatch; i++) {
+		pmatch[i].rm_so = -1;
+		pmatch[i].rm_eo = -1;
+	}
+
+	return 0;
+}
+
+static void
+pcre2_regfree(regex_t *preg)
+{
+	if (preg->re_owner && preg->re_pcre2_code)
+		pcre2_code_free(preg->re_pcre2_code);
+	if (preg->re_match_data)
+		pcre2_match_data_free(preg->re_match_data);
+	preg->re_pcre2_code = NULL;
+	preg->re_match_data = NULL;
+	preg->re_owner = 0;
+}
+
+#define regcomp(P, R, F) pcre2_regcomp(P, R, F, 0)
+#define regexec(P, S, N, M, F) pcre2_regexec(P, S, N, M, F)
+#define regfree(P) pcre2_regfree(P)
+#endif
+
 struct _router {
 	cluster *clusters;
 	route *routes;
@@ -68,6 +164,7 @@ struct _router {
 		int maxstalls;
 		unsigned short iotimeout;
 		unsigned int sockbufsize;
+		char regexjit;
 	} conf;
 	allocator *a;
 };
@@ -144,7 +241,7 @@ router_free_intern(route *routes, char workercnt)
  * Examines pattern and sets matchtype and rule or strmatch in route.
  */
 static inline int
-determine_if_regex(allocator *a, char workercnt, route *r, char *pat)
+determine_if_regex(allocator *a, char workercnt, route *r, char *pat, char use_jit)
 {
 	/* try and see if we can avoid using a regex match, for
 	 * it is simply very slow/expensive to do so: most of
@@ -235,6 +332,7 @@ determine_if_regex(allocator *a, char workercnt, route *r, char *pat)
 					"regular expressions\n");
 			return REG_ESPACE;  /* lie closest to the truth */
 		}
+		memset(r->rule, 0, sizeof(*r->rule) * workercnt);
 		/* issue 465: when no groups are used, regcmp will return
 		 * re_nsub == 0, which in turn means we do not know what part of
 		 * the input string matched the expression
@@ -247,7 +345,11 @@ determine_if_regex(allocator *a, char workercnt, route *r, char *pat)
 		} else {
 			r->pattern = ra_strdup(a, pat);
 		}
+#ifdef HAVE_PCRE2
+		ret = pcre2_regcomp(&r->rule[0], r->pattern, REG_EXTENDED, use_jit);
+#else
 		ret = regcomp(&r->rule[0], r->pattern, REG_EXTENDED);
+#endif
 		if (ret != 0)
 			return ret;  /* allow use of regerror */
 		if (r->rule[0].re_nsub > 0) {
@@ -262,6 +364,19 @@ determine_if_regex(allocator *a, char workercnt, route *r, char *pat)
 			}
 		}
 		for (i = 1; i < workercnt; i++) {
+#ifdef HAVE_PCRE2
+			r->rule[i] = r->rule[0];
+			r->rule[i].re_owner = 0;
+			r->rule[i].re_match_data = pcre2_match_data_create_from_pattern(
+					r->rule[i].re_pcre2_code, NULL);
+			if (r->rule[i].re_match_data == NULL) {
+				while (--i >= 0)
+					regfree(&r->rule[i]);
+				logerr("determine_if_regex: out of memory allocating "
+						"match data\n");
+				return PCRE2_ERROR_NOMEMORY;
+			}
+#else
 			if (regcomp(&r->rule[i], r->pattern, REG_EXTENDED) != 0) {
 				while (--i >= 0)
 					regfree(&r->rule[i]);
@@ -269,6 +384,7 @@ determine_if_regex(allocator *a, char workercnt, route *r, char *pat)
 						"regexes\n");
 				return REG_ESPACE;  /* lie closest to the truth */
 			}
+#endif
 		}
 		/* undo fake capture group not to cause confusing output */
 		if (capgroup == 0) {
@@ -562,16 +678,20 @@ router_validate_expression(router *rtr, route **retr, char *pat)
 		r->dests = NULL;
 	}
 	if (strcmp(pat, "*") == 0) {
-		r->pattern = NULL;
+		r->pattern = ra_strdup(rtr->a, "*");
+		r->rule = NULL;
 		r->strmatch = NULL;
 		r->matchtype = MATCHALL;
 	} else {
-		int err = determine_if_regex(rtr->a, rtr->conf.workercnt, r, pat);
+		int err = determine_if_regex(rtr->a, rtr->conf.workercnt, r, pat, rtr->conf.regexjit);
 		if (err != 0) {
 			char ebuf[512];
 			size_t s = snprintf(ebuf, sizeof(ebuf),
 					"invalid expression '%s': ", pat);
+			if (s >= sizeof(ebuf))
+				s = sizeof(ebuf) - 1;
 			regerror(err, &r->rule[0], ebuf + s, sizeof(ebuf) - s);
+			r->rule = NULL;  /* Prevent invalid free during bison error recovery */
 			return ra_strdup(rtr->a, ebuf);
 		}
 	}
@@ -1300,6 +1420,7 @@ router_readconfig(router *orig,
 		ret->listeners = NULL;
 
 		ret->conf.workercnt = workercnt;
+		ret->conf.regexjit = 1;
 		ret->conf.queuesize = queuesize;
 		ret->conf.batchsize = batchsize;
 		ret->conf.maxstalls = maxstalls;
@@ -1877,6 +1998,21 @@ router_set_collectorvals(router *rtr, int intv, char *prefix, col_mode smode)
 	return NULL;
 }
 
+/**
+ * Enable or disable JIT for PCRE2 regular expressions.
+ */
+char *
+router_set_regexjit(router *rtr, char enable)
+{
+#ifndef HAVE_PCRE2
+	if (enable)
+		logerr("warning: regex-jit enabled but PCRE2 support not compiled in, "
+				"ignoring\n");
+#endif
+	rtr->conf.regexjit = enable;
+	return NULL;
+}
+
 static char *_router_quoteident_buf = NULL;
 static size_t _router_quoteident_buflen = 0;
 static const char *router_quoteident(const char *ident)
@@ -2027,6 +2163,10 @@ router_printconfig(router *rtr, FILE *f, char pmode)
 		}
 		fprintf(f, "    ;\n\n");
 	}
+#ifdef HAVE_PCRE2
+	if (rtr->conf.regexjit == 0)
+		fprintf(f, "regex-jit false;\n");
+#endif
 	if (rtr->collector.interval > 0) {
 		fprintf(f, "statistics\n    submit every %d seconds\n",
 				rtr->collector.interval);
@@ -2529,8 +2669,18 @@ router_shutdown(router *rtr)
 		server_shutdown(s->server);
 }
 
+void
+router_free_route(route *r, char workercnt)
+{
+	if (r->matchtype == REGEX && r->rule != NULL) {
+		int i;
+		for (i = 0; i < workercnt; i++)
+			regfree(&r->rule[i]);
+	}
+}
+
 /**
- * Free the routes and all associated resources.
+ * Frees a router and all its associated resources.
  */
 void
 router_free(router *rtr)

@@ -120,5 +120,7 @@ char *router_getcollectorprefix(router *r);
 col_mode router_getcollectormode(router *r);
 void router_shutdown(router *r);
 void router_free(router *r);
+struct _route;
+void router_free_route(struct _route *r, char workercnt);
 
 #endif

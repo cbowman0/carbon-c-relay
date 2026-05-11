@@ -120,5 +120,6 @@ char *router_add_stubroute(router *rtr, enum clusttype type, cluster *w, destina
 char *router_add_listener(router *rtr, con_type ltype, con_trnsp trnsp, char *pemcert, tlsprotover protomin, tlsprotover protomax, char *ciphers, char *suites, con_proto ctype, char *ip, unsigned short port, struct addrinfo *saddrs);
 char *router_set_statistics(router *rtr, destinations *dsts);
 char *router_set_collectorvals(router *rtr, int val, char *prefix, col_mode m);
+char *router_set_regexjit(router *rtr, char enable);
 
 #endif

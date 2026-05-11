@@ -135,10 +135,24 @@ struct _rcptr_trsp {
 	aggregate_opt_compute
 
 %token crSTATISTICS
+%token crREGEX_JIT
 %token crSUBMIT crRESET crCOUNTERS crINTERVAL crPREFIX crWITH
 %type <int> statistics_opt_interval
 %type <col_mode> statistics_opt_counters
 %type <char *> statistics_opt_prefix
+
+%destructor {
+	if ($$ != NULL) {
+		struct _maexpr *we = $$;
+		struct _maexpr *next;
+		while (we != NULL) {
+			if (we->r != NULL)
+				router_free_route(we->r, rtr->conf.workercnt);
+			next = we->next;
+			we = next;
+		}
+	}
+} <struct _maexpr *>
 
 %token crLISTEN
 %token crTYPE crLINEMODE crSYSLOGMODE crTRANSPORT
@@ -182,6 +196,7 @@ command: cluster
 	   | send
 	   | statistics
 	   | listen
+	   | regexjit
 	   | include
 	   ;
 
@@ -610,6 +625,8 @@ match_expr: crSTRING[expr]
 		   	$$->r = NULL;
 		  	err = router_validate_expression(rtr, &($$->r), $expr);
 			if (err != NULL) {
+				if ($$->r != NULL)
+					router_free_route($$->r, rtr->conf.workercnt);
 				router_yyerror(&yylloc, yyscanner, rtr,
 						ralloc, palloc, err);
 				YYERROR;
@@ -630,6 +647,8 @@ match_opt_validate: { $$ = NULL; }
 					$$->r = NULL;
 					err = router_validate_expression(rtr, &($$->r), $expr);
 					if (err != NULL) {
+						if ($$->r != NULL)
+							router_free_route($$->r, rtr->conf.workercnt);
 						router_yyerror(&yylloc, yyscanner, rtr,
 								ralloc, palloc, err);
 						YYERROR;
@@ -1236,6 +1255,30 @@ rcptr_proto: crTCP { $$ = CON_TCP; }
 		   | crUDP { $$ = CON_UDP; }
 		   ;
 /*** }}} END listen ***/
+
+/*** {{{ BEGIN regex-jit ***/
+regexjit: crREGEX_JIT crSTRING[enable]
+		{
+			char enable = 0;
+			if (strcmp($enable, "true") == 0 ||
+					strcmp($enable, "on") == 0 ||
+					strcmp($enable, "yes") == 0)
+			{
+				enable = 1;
+			} else if (strcmp($enable, "false") == 0 ||
+					strcmp($enable, "off") == 0 ||
+					strcmp($enable, "no") == 0)
+			{
+				enable = 0;
+			} else {
+				router_yyerror(&yylloc, yyscanner, rtr, ralloc, palloc,
+						"regex-jit must be true, on, yes, false, off or no");
+				YYERROR;
+			}
+			router_set_regexjit(rtr, enable);
+		}
+		;
+/*** }}} END regex-jit ***/
 
 /*** {{{ BEGIN include ***/
 include: crINCLUDE crSTRING[path]
