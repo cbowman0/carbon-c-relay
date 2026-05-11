@@ -199,19 +199,13 @@ send				{
 					}
 
 statistics			{
-						identstate = idag;
-						BEGIN(idag);
+						BEGIN(st);
 						return crSTATISTICS;
 					}
 regex-jit			{
 						identstate = idin;
 						BEGIN(idin);
 						return crREGEX_JIT;
-					}
-include				{
-						identstate = idin;
-						BEGIN(idin);
-						return crINCLUDE;
 					}
 <st>submit				return crSUBMIT;
 <st>every				return crEVERY;

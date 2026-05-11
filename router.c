@@ -51,6 +51,12 @@ pcre2_regcomp(regex_t *preg, const char *pattern, int cflags, char use_jit)
 	PCRE2_SIZE erroroffset;
 	uint32_t options = 0;
 
+	/* cflags are POSIX-style; REG_EXTENDED/REG_ICASE/REG_NOSUB are all
+	 * defined as 0 in the PCRE2 path so they're currently no-ops.  If
+	 * future callers need translation, map them to PCRE2_CASELESS etc.
+	 * here. */
+	(void)cflags;
+
 	preg->re_pcre2_code = pcre2_compile(
 			(PCRE2_SPTR)pattern,
 			PCRE2_ZERO_TERMINATED,
@@ -67,8 +73,16 @@ pcre2_regcomp(regex_t *preg, const char *pattern, int cflags, char use_jit)
 			PCRE2_INFO_CAPTURECOUNT, &preg->re_nsub);
 
 	if (use_jit) {
-		if (pcre2_jit_compile(preg->re_pcre2_code, PCRE2_JIT_COMPLETE) < 0) {
-			/* ignore JIT failure, we can still match interpretively */
+		int jit_rc = pcre2_jit_compile(preg->re_pcre2_code, PCRE2_JIT_COMPLETE);
+		if (jit_rc < 0) {
+			/* JIT failed; fall back to interpretive matching, but warn
+			 * once at compile time so operators aren't silently losing
+			 * the perf they asked for */
+			PCRE2_UCHAR errbuf[256];
+			pcre2_get_error_message(jit_rc, errbuf, sizeof(errbuf));
+			logerr("pcre2_jit_compile failed for pattern '%s': %s "
+					"(falling back to interpreted match)\n",
+					pattern, (char *)errbuf);
 		}
 	}
 
@@ -1950,6 +1964,18 @@ router_getcollectormode(router *rtr)
 }
 
 /**
+ * Returns the configured worker count for this router.  Needed by the
+ * bison-generated parser so it can free per-worker regex resources on
+ * parse-error recovery without having to know the layout of struct
+ * _router.
+ */
+inline char
+router_getworkercnt(router *rtr)
+{
+	return rtr->conf.workercnt;
+}
+
+/**
  * Sets the collector interval in seconds, the metric prefix string, and
  * the emission mode (cumulative or sum).
  */
@@ -2004,7 +2030,16 @@ router_set_collectorvals(router *rtr, int intv, char *prefix, col_mode smode)
 char *
 router_set_regexjit(router *rtr, char enable)
 {
-#ifndef HAVE_PCRE2
+#ifdef HAVE_PCRE2
+	if (enable) {
+		uint32_t jit_available = 0;
+		(void)pcre2_config(PCRE2_CONFIG_JIT, &jit_available);
+		if (!jit_available) {
+			logerr("warning: regex-jit enabled but PCRE2 was built without "
+					"JIT support, patterns will use interpreted matching\n");
+		}
+	}
+#else
 	if (enable)
 		logerr("warning: regex-jit enabled but PCRE2 support not compiled in, "
 				"ignoring\n");
@@ -2164,7 +2199,10 @@ router_printconfig(router *rtr, FILE *f, char pmode)
 		fprintf(f, "    ;\n\n");
 	}
 #ifdef HAVE_PCRE2
-	if (rtr->conf.regexjit == 0)
+	/* only emit at top level; the recursive call for GROUP routes uses
+	 * a stack-allocated router with zero-initialised conf, which would
+	 * otherwise inject this line in the middle of a group dump */
+	if (rtr->conf.regexjit == 0 && rtr->a != NULL)
 		fprintf(f, "regex-jit false;\n");
 #endif
 	if (rtr->collector.interval > 0) {

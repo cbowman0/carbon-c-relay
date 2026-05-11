@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+#include <string.h>
+
 #include "allocator.h"
 #include "conffile.h"
 #include "conffile.tab.h"
@@ -147,7 +149,7 @@ struct _rcptr_trsp {
 		struct _maexpr *next;
 		while (we != NULL) {
 			if (we->r != NULL)
-				router_free_route(we->r, rtr->conf.workercnt);
+				router_free_route(we->r, router_getworkercnt(rtr));
 			next = we->next;
 			we = next;
 		}
@@ -626,7 +628,7 @@ match_expr: crSTRING[expr]
 		  	err = router_validate_expression(rtr, &($$->r), $expr);
 			if (err != NULL) {
 				if ($$->r != NULL)
-					router_free_route($$->r, rtr->conf.workercnt);
+					router_free_route($$->r, router_getworkercnt(rtr));
 				router_yyerror(&yylloc, yyscanner, rtr,
 						ralloc, palloc, err);
 				YYERROR;
@@ -648,7 +650,7 @@ match_opt_validate: { $$ = NULL; }
 					err = router_validate_expression(rtr, &($$->r), $expr);
 					if (err != NULL) {
 						if ($$->r != NULL)
-							router_free_route($$->r, rtr->conf.workercnt);
+							router_free_route($$->r, router_getworkercnt(rtr));
 						router_yyerror(&yylloc, yyscanner, rtr,
 								ralloc, palloc, err);
 						YYERROR;
