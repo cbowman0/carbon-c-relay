@@ -379,15 +379,15 @@ determine_if_regex(allocator *a, char workercnt, route *r, char *pat, char use_j
 		}
 		for (i = 1; i < workercnt; i++) {
 #ifdef HAVE_PCRE2
-			r->rule[i] = r->rule[0];
-			r->rule[i].re_owner = 0;
-			r->rule[i].re_match_data = pcre2_match_data_create_from_pattern(
-					r->rule[i].re_pcre2_code, NULL);
-			if (r->rule[i].re_match_data == NULL) {
+			/* EXPERIMENT: compile per worker to eliminate shared
+			 * pcre2_code contention.  Each worker owns its own code
+			 * object, JIT-compiled state, and match_data. */
+			if (pcre2_regcomp(&r->rule[i], r->pattern,
+						REG_EXTENDED, use_jit) != 0) {
 				while (--i >= 0)
 					regfree(&r->rule[i]);
-				logerr("determine_if_regex: out of memory allocating "
-						"match data\n");
+				logerr("determine_if_regex: failed compiling per-worker "
+						"regex\n");
 				return PCRE2_ERROR_NOMEMORY;
 			}
 #else
